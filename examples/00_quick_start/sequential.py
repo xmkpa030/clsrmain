@@ -20,6 +20,7 @@ from reco_utils.recommender.deeprec.deeprec_utils import (
 from reco_utils.dataset.sequential_reviews import data_preprocessing
 from reco_utils.recommender.deeprec.models.sequential.sli_rec import SLI_RECModel
 from reco_utils.recommender.deeprec.models.sequential.clsr import CLSRModel
+from reco_utils.recommender.deeprec.models.sequential.clsr_disentangle import CLSRDisentangleModel
 from reco_utils.recommender.deeprec.models.sequential.asvd import A2SVDModel
 from reco_utils.recommender.deeprec.models.sequential.caser import CaserModel
 from reco_utils.recommender.deeprec.models.sequential.gru4rec import GRU4RecModel
@@ -66,6 +67,9 @@ flags.DEFINE_float('discrepancy_loss_weight', 0.01, 'Loss weight for discrepancy
 flags.DEFINE_float('contrastive_loss_weight', 0.1, 'Loss weight for contrastive of long and short intention.')
 flags.DEFINE_float('learning_rate', 0.001, 'Learning rate.')
 flags.DEFINE_integer('show_step', 500, 'Step for showing metrics.')
+flags.DEFINE_integer('K_long', 2, 'Number of disentangled intent channels for long-term branch.')
+flags.DEFINE_integer('K_short', 2, 'Number of disentangled intent channels for short-term branch.')
+flags.DEFINE_float('lambda_orth', 0.0, 'Orthogonality regularization weight for intent channels.')
 
 
 def get_model(flags_obj, model_path, summary_path, user_vocab, item_vocab, cate_vocab, train_num_ngs):
@@ -85,7 +89,7 @@ def get_model(flags_obj, model_path, summary_path, user_vocab, item_vocab, cate_
         max_seq_length = 50
         time_unit = 's'
 
-    if flags_obj.model in ['SLIREC', 'CLSR']:
+    if flags_obj.model in ['SLIREC', 'CLSR', 'CLSR_DISENTANGLE']:
         input_creator = SASequentialIterator
     else:
         input_creator = SequentialIterator
@@ -152,6 +156,45 @@ def get_model(flags_obj, model_path, summary_path, user_vocab, item_vocab, cate_
                                 time_unit=time_unit,
                     )
         model = CLSRModel(hparams, input_creator, seed=RANDOM_SEED)
+
+    elif flags_obj.model == 'CLSR_DISENTANGLE':
+        yaml_file = '../../reco_utils/recommender/deeprec/config/clsr.yaml'
+        hparams = prepare_hparams(yaml_file,
+                                embed_l2=flags_obj.embed_l2,
+                                layer_l2=flags_obj.layer_l2,
+                                contrastive_loss=flags_obj.contrastive_loss,
+                                triplet_margin=flags_obj.triplet_margin,
+                                discrepancy_loss_weight=flags_obj.discrepancy_loss_weight,
+                                contrastive_loss_weight=flags_obj.contrastive_loss_weight,
+                                learning_rate=flags_obj.learning_rate,
+                                epochs=EPOCHS,
+                                EARLY_STOP=flags_obj.early_stop,
+                                manual_alpha=flags_obj.manual_alpha,
+                                manual_alpha_value=flags_obj.manual_alpha_value,
+                                interest_evolve=flags_obj.interest_evolve,
+                                predict_long_short=flags_obj.predict_long_short,
+                                is_clip_norm=flags_obj.is_clip_norm,
+                                contrastive_length_threshold=flags_obj.contrastive_length_threshold,
+                                contrastive_recent_k=flags_obj.contrastive_recent_k,
+                                batch_size=BATCH_SIZE,
+                                show_step=flags_obj.show_step,
+                                MODEL_DIR=model_path,
+                                SUMMARIES_DIR=summary_path,
+                                user_vocab=user_vocab,
+                                item_vocab=item_vocab,
+                                cate_vocab=cate_vocab,
+                                need_sample=True,
+                                train_num_ngs=train_num_ngs,
+                                max_seq_length=max_seq_length,
+                                pairwise_metrics=pairwise_metrics,
+                                weighted_metrics=weighted_metrics,
+                                sequential_model=flags_obj.sequential_model,
+                                K_long=flags_obj.K_long,
+                                K_short=flags_obj.K_short,
+                                lambda_orth=flags_obj.lambda_orth,
+                                time_unit=time_unit,
+                    )
+        model = CLSRDisentangleModel(hparams, input_creator, seed=RANDOM_SEED)
 
     #GRU4REC
     elif flags_obj.model == 'GRU4REC':
