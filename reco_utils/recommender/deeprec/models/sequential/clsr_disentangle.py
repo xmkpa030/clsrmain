@@ -42,10 +42,13 @@ class CLSRDisentangleModel(CLSRModel):
             long_intents = self._disentangle_long_interest(long_interest)
             short_intents = self._disentangle_short_interest(short_interest)
 
-            self.att_fea_long = self._aggregate_long_intents(long_intents)
-            self.att_fea_short = self._aggregate_short_intents(short_intents)
+            self.long_repr_dis = self._aggregate_long_intents(long_intents)
+            self.short_repr_dis = self._aggregate_short_intents(short_intents)
+            # keep original attribute names for existing loss/training compatibility
+            self.att_fea_long = self.long_repr_dis
+            self.att_fea_short = self.short_repr_dis
 
-            user_embed = self._fuse_long_short(hist_input)
+            user_embed = self._fuse_long_short(self.long_repr_dis, self.short_repr_dis)
             model_output = tf.concat([user_embed, self.target_item_embedding], 1)
             tf.summary.histogram("model_output", model_output)
             return model_output
@@ -171,9 +174,10 @@ class CLSRDisentangleModel(CLSRModel):
         tf.summary.histogram("att_fea_short", short_interest)
         return short_interest
 
-    def _fuse_long_short(self, hist_input):
+    def _fuse_long_short(self, long_repr, short_repr):
         hparams = self.hparams
         with tf.name_scope("alpha"):
+            hist_input = tf.concat([self.item_history_embedding, self.cate_history_embedding], 2)
             if not hparams.manual_alpha:
                 if hparams.predict_long_short:
                     with tf.variable_scope("causal2"):
@@ -190,8 +194,8 @@ class CLSRDisentangleModel(CLSRModel):
                         [
                             final_state,
                             self.target_item_embedding,
-                            self.att_fea_long,
-                            self.att_fea_short,
+                            long_repr,
+                            short_repr,
                             tf.expand_dims(self.iterator.time_to_now[:, -1], -1),
                         ],
                         1,
@@ -200,8 +204,8 @@ class CLSRDisentangleModel(CLSRModel):
                     concat_all = tf.concat(
                         [
                             self.target_item_embedding,
-                            self.att_fea_long,
-                            self.att_fea_short,
+                            long_repr,
+                            short_repr,
                             tf.expand_dims(self.iterator.time_to_now[:, -1], -1),
                         ],
                         1,
@@ -209,7 +213,7 @@ class CLSRDisentangleModel(CLSRModel):
 
                 alpha_logit = self._fcn_net(concat_all, hparams.att_fcn_layer_sizes, scope="fcn_alpha")
                 self.alpha_output = tf.sigmoid(alpha_logit)
-                user_embed = self.att_fea_long * self.alpha_output + self.att_fea_short * (1.0 - self.alpha_output)
+                user_embed = long_repr * self.alpha_output + short_repr * (1.0 - self.alpha_output)
                 tf.summary.histogram("alpha", self.alpha_output)
                 self.alpha_output_mean = self.alpha_output
                 error_with_category = self.alpha_output_mean - self.iterator.attn_labels
@@ -222,9 +226,7 @@ class CLSRDisentangleModel(CLSRModel):
                 tf.summary.histogram("squared_error_with_category", squared_error_with_category)
             else:
                 self.alpha_output = tf.constant([[hparams.manual_alpha_value]])
-                user_embed = self.att_fea_long * hparams.manual_alpha_value + self.att_fea_short * (
-                    1.0 - hparams.manual_alpha_value
-                )
+                user_embed = long_repr * hparams.manual_alpha_value + short_repr * (1.0 - hparams.manual_alpha_value)
             return user_embed
 
     def _add_summaries(self):
