@@ -18,6 +18,13 @@ __all__ = ["CLSRModel"]
 
 
 class CLSRModel(SequentialBaseModel):
+    """CLSR sequential recommender.
+
+    这个模型把用户兴趣拆成长期兴趣和短期兴趣两条支路：
+    1. 长期分支从完整历史里抽取稳定偏好；
+    2. 短期分支从最近行为和序列演化里抽取即时意图；
+    3. 再通过 alpha 动态融合两种兴趣完成推荐。
+    """
 
     def _get_loss(self):
         """Make loss function, consists of data loss, regularization loss, contrastive loss and discrepancy loss
@@ -30,6 +37,7 @@ class CLSRModel(SequentialBaseModel):
         self.contrastive_loss = self._compute_contrastive_loss()
         self.discrepancy_loss = self._compute_discrepancy_loss()
 
+        # 总损失 = 主任务损失 + 正则项 + 对比约束 + 长短期用户向量差异约束。
         self.loss = self.data_loss + self.regular_loss + self.contrastive_loss + self.discrepancy_loss
         return self.loss
 
@@ -45,18 +53,21 @@ class CLSRModel(SequentialBaseModel):
 
     def _compute_contrastive_loss(self):
         """Contrative loss on long and short term intention."""
+        # 只在序列长度超过阈值时计算对比损失，避免短序列带来噪声。
         contrastive_mask = tf.where(
             tf.greater(self.sequence_length, self.hparams.contrastive_length_threshold),
             tf.ones_like(self.sequence_length, dtype=tf.float32),
             tf.zeros_like(self.sequence_length, dtype=tf.float32)
         )
         if self.hparams.contrastive_loss == 'bpr':
+            # BPR 风格：让长期兴趣更接近整体历史均值、让短期兴趣更接近最近行为均值。
             long_mean_recent_loss = tf.reduce_sum(contrastive_mask*tf.math.softplus(tf.reduce_sum(self.att_fea_long*(-self.hist_mean + self.hist_recent), -1)))/tf.reduce_sum(contrastive_mask)
             short_recent_mean_loss = tf.reduce_sum(contrastive_mask*tf.math.softplus(tf.reduce_sum(self.att_fea_short*(-self.hist_recent + self.hist_mean), -1)))/tf.reduce_sum(contrastive_mask)
             mean_long_short_loss = tf.reduce_sum(contrastive_mask*tf.math.softplus(tf.reduce_sum(self.hist_mean*(-self.att_fea_long + self.att_fea_short), -1)))/tf.reduce_sum(contrastive_mask)
             recent_short_long_loss = tf.reduce_sum(contrastive_mask*tf.math.softplus(tf.reduce_sum(self.hist_recent*(-self.att_fea_short + self.att_fea_long), -1)))/tf.reduce_sum(contrastive_mask)
         elif self.hparams.contrastive_loss == 'triplet':
             margin = self.hparams.triplet_margin
+            # Triplet 风格：直接比较正负配对间的平方距离，并强制保留 margin。
             distance_long_mean = tf.square(self.att_fea_long - self.hist_mean)
             distance_long_recent = tf.square(self.att_fea_long - self.hist_recent)
             distance_short_mean = tf.square(self.att_fea_short - self.hist_mean)
@@ -66,12 +77,14 @@ class CLSRModel(SequentialBaseModel):
             mean_long_short_loss = tf.reduce_sum(contrastive_mask*tf.reduce_sum(tf.maximum(0.0, distance_long_mean - distance_short_mean + margin), -1))/tf.reduce_sum(contrastive_mask)
             recent_short_long_loss = tf.reduce_sum(contrastive_mask*tf.reduce_sum(tf.maximum(0.0, distance_short_recent - distance_long_recent + margin), -1))/tf.reduce_sum(contrastive_mask)
 
+        # 四项一起约束：长期/短期兴趣应分别贴近各自代理表示，并与另一类代理拉开。
         contrastive_loss = long_mean_recent_loss + short_recent_mean_loss + mean_long_short_loss + recent_short_long_loss
         contrastive_loss = tf.multiply(self.hparams.contrastive_loss_weight, contrastive_loss)
         return contrastive_loss
 
     def _compute_discrepancy_loss(self):
         """Discrepancy loss between long and short term user embeddings."""
+        # 注意这里最终带负号加入总损失，因此优化目标实际上是在鼓励两套用户向量彼此区分。
         discrepancy_loss = tf.reduce_mean(
             tf.math.squared_difference(
                 tf.reshape(self.involved_user_long_embedding, [-1]),
@@ -89,6 +102,7 @@ class CLSRModel(SequentialBaseModel):
         self.user_embedding_dim = hparams.user_embedding_dim
 
         with tf.variable_scope("embedding", initializer=self.initializer):
+            # 同一个用户维护两套 embedding：一套服务长期兴趣，一套服务短期兴趣。
             self.user_long_lookup = tf.get_variable(
                 name="user_long_embedding",
                 shape=[self.user_vocab_length, self.user_embedding_dim],
@@ -105,16 +119,19 @@ class CLSRModel(SequentialBaseModel):
         """
         super(CLSRModel, self)._lookup_from_embedding()
 
+        # 当前 batch 的长期用户向量，后面会作为 long-term attention 的 query。
         self.user_long_embedding = tf.nn.embedding_lookup(
             self.user_long_lookup, self.iterator.users
         )
         tf.summary.histogram("user_long_embedding_output", self.user_long_embedding)
 
+        # 当前 batch 的短期用户向量，后面会作为短期兴趣演化的初始状态。
         self.user_short_embedding = tf.nn.embedding_lookup(
             self.user_short_lookup, self.iterator.users
         )
         tf.summary.histogram("user_short_embedding_output", self.user_short_embedding)
 
+        # 只收集当前 batch 中出现过的用户，便于对相关 embedding 施加约束和正则。
         involved_users = tf.reshape(self.iterator.users, [-1])
         self.involved_users, _ = tf.unique(involved_users)
         self.involved_user_long_embedding = tf.nn.embedding_lookup(
@@ -142,6 +159,7 @@ class CLSRModel(SequentialBaseModel):
         """
         hparams = self.hparams
         with tf.variable_scope("clsr"):
+            # 序列输入由 item embedding 和 cate embedding 拼接得到。
             hist_input = tf.concat(
                 [self.item_history_embedding, self.cate_history_embedding], 2
             )
@@ -150,14 +168,17 @@ class CLSRModel(SequentialBaseModel):
             self.sequence_length = tf.reduce_sum(self.mask, 1)
 
             with tf.variable_scope("long_term"):
+                # 长期兴趣分支：用长期用户向量在完整历史上做注意力汇聚。
                 att_outputs_long = self._attention_fcn(self.user_long_embedding, hist_input)
                 self.att_fea_long = tf.reduce_sum(att_outputs_long, 1)
                 tf.summary.histogram("att_fea_long", self.att_fea_long)
 
+                # 完整历史均值是长期兴趣的代理表示，用来构造对比损失。
                 self.hist_mean = tf.reduce_sum(hist_input*tf.expand_dims(self.real_mask, -1), 1)/tf.reduce_sum(self.real_mask, 1, keepdims=True)
 
             with tf.variable_scope("short_term"):
                 if hparams.interest_evolve:
+                    # 从短期用户向量出发，用 GRU 建模兴趣随行为序列的演化。
                     _, short_term_intention = dynamic_rnn(
                         tf.nn.rnn_cell.GRUCell(hparams.user_embedding_dim),
                         inputs=hist_input,
@@ -167,16 +188,20 @@ class CLSRModel(SequentialBaseModel):
                         scope="short_term_intention",
                     )
                 else:
+                    # 不建模演化时，直接把短期用户 embedding 当作短期意图。
                     short_term_intention = self.user_short_embedding
                 tf.summary.histogram("GRU_final_state", short_term_intention)
 
+                # reverse cumsum 会把最后一个有效位置记成 1，用它来筛出最近 k 个行为。
                 self.position = tf.math.cumsum(self.real_mask, axis=1, reverse=True)
                 self.recent_mask = tf.logical_and(self.position >= 1, self.position <= hparams.contrastive_recent_k)
                 self.real_recent_mask = tf.where(self.recent_mask, tf.ones_like(self.recent_mask, dtype=tf.float32), tf.zeros_like(self.recent_mask, dtype=tf.float32))
 
+                # 最近行为均值是短期兴趣的代理表示，用来构造对比损失。
                 self.hist_recent = tf.reduce_sum(hist_input*tf.expand_dims(self.real_recent_mask, -1), 1)/tf.reduce_sum(self.real_recent_mask, 1, keepdims=True)
 
                 if hparams.sequential_model == 'time4lstm':
+                    # Time4LSTM 额外拼接两个时间特征，显式利用时序间隔信息。
                     item_history_embedding_new = tf.concat(
                         [
                             hist_input,
@@ -199,6 +224,7 @@ class CLSRModel(SequentialBaseModel):
                         scope="time4lstm",
                     )
                 elif hparams.sequential_model == 'gru':
+                    # 也支持普通 GRU 编码整段序列。
                     rnn_outputs, _ = dynamic_rnn(
                         tf.nn.rnn_cell.GRUCell(hparams.hidden_size),
                         inputs=hist_input,
@@ -207,6 +233,7 @@ class CLSRModel(SequentialBaseModel):
                         scope="simple_gru",
                     )
                 elif hparams.sequential_model == 'lstm':
+                    # 或使用普通 LSTM 编码整段序列。
                     rnn_outputs, _ = dynamic_rnn(
                         tf.nn.rnn_cell.LSTMCell(hparams.hidden_size),
                         inputs=hist_input,
@@ -216,6 +243,7 @@ class CLSRModel(SequentialBaseModel):
                     )
                 tf.summary.histogram("LSTM_outputs", rnn_outputs)
 
+                # 短期分支的 query = 短期意图 + 目标物品，强调“与当前目标最相关”的近期行为。
                 short_term_query = tf.concat([short_term_intention, self.target_item_embedding], -1)
                 att_outputs_short = self._attention_fcn(short_term_query, rnn_outputs)
                 self.att_fea_short = tf.reduce_sum(att_outputs_short, 1)
@@ -226,6 +254,7 @@ class CLSRModel(SequentialBaseModel):
 
                 if not hparams.manual_alpha:
                     if hparams.predict_long_short:
+                        # 额外编码一遍历史，辅助判断当前预测更依赖长期兴趣还是短期兴趣。
                         with tf.variable_scope("causal2"):
                             _, final_state = dynamic_rnn(
                                 tf.nn.rnn_cell.GRUCell(hparams.hidden_size),
@@ -262,6 +291,7 @@ class CLSRModel(SequentialBaseModel):
                         last_hidden_nn_layer, hparams.att_fcn_layer_sizes, scope="fcn_alpha"
                     )
                     self.alpha_output = tf.sigmoid(alpha_logit)
+                    # alpha 越大越偏向长期兴趣，越小越偏向短期兴趣。
                     user_embed = self.att_fea_long * self.alpha_output + self.att_fea_short * (1.0 - self.alpha_output)
                     tf.summary.histogram("alpha", self.alpha_output)
                     self.alpha_output_mean = self.alpha_output
@@ -270,8 +300,10 @@ class CLSRModel(SequentialBaseModel):
                     squared_error_with_category = tf.math.sqrt(tf.math.squared_difference(tf.reshape(self.alpha_output_mean, [-1]), tf.reshape(self.iterator.attn_labels, [-1])))
                     tf.summary.histogram("squared_error_with_category", squared_error_with_category)
                 else:
+                    # 消融实验时可以手动固定融合比例。
                     self.alpha_output = tf.constant([[hparams.manual_alpha_value]])
                     user_embed = self.att_fea_long * hparams.manual_alpha_value + self.att_fea_short * (1.0 - hparams.manual_alpha_value)
+            # 最终把融合后的用户表示与目标物品表示拼接，交给顶层 MLP 做点击预测。
             model_output = tf.concat([user_embed, self.target_item_embedding], 1)
             tf.summary.histogram("model_output", model_output)
             return model_output
@@ -355,6 +387,7 @@ class CLSRModel(SequentialBaseModel):
             query_size = query.shape[1].value
             boolean_mask = tf.equal(self.mask, tf.ones_like(self.mask))
 
+            # 先把序列表示投影到 query 同维空间，再做 DIN 风格匹配。
             attention_mat = tf.get_variable(
                 name="attention_mat",
                 shape=[user_embedding.shape.as_list()[-1], query_size],
@@ -373,6 +406,7 @@ class CLSRModel(SequentialBaseModel):
             )
             att_fnc_output = tf.squeeze(att_fnc_output, -1)
             mask_paddings = tf.ones_like(att_fnc_output) * (-(2 ** 32) + 1)
+            # padding 位在 softmax 前被压成极小值，因此不会分到注意力权重。
             att_weights = tf.nn.softmax(
                 tf.where(boolean_mask, att_fnc_output, mask_paddings),
                 name="att_weights",
@@ -390,6 +424,7 @@ class CLSRModel(SequentialBaseModel):
         Returns:
             list: A list of values, including update operation, total loss, data loss, and merged summary.
         """
+        # 训练时同时开启 dropout 和 BN 的 training 模式。
         feed_dict[self.layer_keeps] = self.keep_prob_train
         feed_dict[self.embedding_keeps] = self.embedding_keep_prob_train
         feed_dict[self.is_train_stage] = True
@@ -426,6 +461,7 @@ class CLSRModel(SequentialBaseModel):
         epoch_discrepancy_loss = 0
         for batch_data_input in file_iterator:
             if batch_data_input:
+                # 除总损失外，额外统计各子损失，便于排查 CLSR 训练是否失衡。
                 step_result = self.train(train_sess, batch_data_input)
                 (_, _, step_loss, step_data_loss, step_regular_loss, step_contrastive_loss, step_discrepancy_loss, summary) = step_result
                 if self.hparams.write_tfevents and self.hparams.SUMMARIES_DIR:
