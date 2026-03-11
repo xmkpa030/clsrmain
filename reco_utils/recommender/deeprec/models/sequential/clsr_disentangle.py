@@ -165,12 +165,36 @@ class CLSRDisentangleModel(CLSRModel):
             return intents
 
     def _aggregate_long_intents(self, long_intents):
-        long_interest = tf.reduce_mean(long_intents, axis=1)
+        with tf.variable_scope("long_intent_aggregate"):
+            long_gate_logits = tf.layers.dense(long_intents, 1, name="long_gate_score")
+            long_gate_logits = tf.squeeze(long_gate_logits, axis=-1)
+            long_gate_weights = tf.nn.softmax(long_gate_logits, axis=1)
+            long_interest = tf.reduce_sum(long_intents * tf.expand_dims(long_gate_weights, -1), axis=1)
+
+            long_gate_entropy = -tf.reduce_mean(
+                tf.reduce_sum(long_gate_weights * tf.log(long_gate_weights + 1e-12), axis=1)
+            )
+
+            tf.summary.histogram("long_gate_logits", long_gate_logits)
+            tf.summary.histogram("long_gate_weights", long_gate_weights)
+            tf.summary.scalar("long_gate_entropy", long_gate_entropy)
         tf.summary.histogram("att_fea_long", long_interest)
         return long_interest
 
     def _aggregate_short_intents(self, short_intents):
-        short_interest = tf.reduce_mean(short_intents, axis=1)
+        with tf.variable_scope("short_intent_aggregate"):
+            short_gate_logits = tf.layers.dense(short_intents, 1, name="short_gate_score")
+            short_gate_logits = tf.squeeze(short_gate_logits, axis=-1)
+            short_gate_weights = tf.nn.softmax(short_gate_logits, axis=1)
+            short_interest = tf.reduce_sum(short_intents * tf.expand_dims(short_gate_weights, -1), axis=1)
+
+            short_gate_entropy = -tf.reduce_mean(
+                tf.reduce_sum(short_gate_weights * tf.log(short_gate_weights + 1e-12), axis=1)
+            )
+
+            tf.summary.histogram("short_gate_logits", short_gate_logits)
+            tf.summary.histogram("short_gate_weights", short_gate_weights)
+            tf.summary.scalar("short_gate_entropy", short_gate_entropy)
         tf.summary.histogram("att_fea_short", short_interest)
         return short_interest
 
