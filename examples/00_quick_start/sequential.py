@@ -43,6 +43,10 @@ flags.DEFINE_string('save_path', '', 'Save path.')
 flags.DEFINE_string('contrastive_loss', 'triplet', 'Contrastive loss, could be bpr or triplet.')
 flags.DEFINE_integer('contrastive_length_threshold', 5, 'Minimum sequence length value to apply contrastive loss.')
 flags.DEFINE_integer('contrastive_recent_k', 3, 'Use the most recent k embeddings to compute short-term proxy.')
+flags.DEFINE_string('long_proxy_type', 'mean', 'Long-term proxy type: mean, decay, or update.')
+flags.DEFINE_float('long_proxy_decay_lambda', 0.05, 'Decay coefficient for time-decayed long-term proxy.')
+flags.DEFINE_float('long_proxy_update_beta', 0.3, 'Update factor beta for windowed long-term proxy update.')
+flags.DEFINE_integer('long_proxy_update_window_size', 10, 'Window size for windowed long-term proxy update.')
 flags.DEFINE_string('name', 'taobao-clsr-debug', 'Experiment name.')
 flags.DEFINE_string('model', 'CLSR', 'Model name.')
 flags.DEFINE_boolean('only_test', False, 'Only test and do not train.')
@@ -136,6 +140,10 @@ def get_model(flags_obj, model_path, summary_path, user_vocab, item_vocab, cate_
                                 is_clip_norm=flags_obj.is_clip_norm,
                                 contrastive_length_threshold=flags_obj.contrastive_length_threshold,
                                 contrastive_recent_k=flags_obj.contrastive_recent_k,
+                                long_proxy_type=flags_obj.long_proxy_type,
+                                long_proxy_decay_lambda=flags_obj.long_proxy_decay_lambda,
+                                long_proxy_update_beta=flags_obj.long_proxy_update_beta,
+                                long_proxy_update_window_size=flags_obj.long_proxy_update_window_size,
                                 batch_size=BATCH_SIZE,
                                 show_step=flags_obj.show_step,
                                 MODEL_DIR=model_path,

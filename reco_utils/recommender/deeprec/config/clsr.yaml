@@ -42,6 +42,10 @@ train:
     attention_size : 40 # the shape of attention size
     need_sample: True # whether to perform dynamic negative sampling in mini-batch
     train_num_ngs: 4 # indicates how many negative instances followed by one positive instances if need_sample is True
+    long_proxy_type : mean # long-term proxy type: mean, decay, update
+    long_proxy_decay_lambda : 0.05 # decay lambda when long_proxy_type=decay
+    long_proxy_update_beta : 0.3 # update beta when long_proxy_type=update
+    long_proxy_update_window_size : 10 # segment window size when long_proxy_type=update
 
 #show info
 #metric :'auc', 'logloss', 'group_auc'
@@ -56,4 +60,3 @@ info:
     write_tfevents : True  # whether to save summaries.
 
     
-

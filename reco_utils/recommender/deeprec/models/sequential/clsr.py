@@ -166,6 +166,7 @@ class CLSRModel(SequentialBaseModel):
             self.mask = self.iterator.mask
             self.real_mask = tf.cast(self.mask, tf.float32)
             self.sequence_length = tf.reduce_sum(self.mask, 1)
+            self.position = tf.math.cumsum(self.real_mask, axis=1, reverse=True)
 
             with tf.variable_scope("long_term"):
                 # 长期兴趣分支：用长期用户向量在完整历史上做注意力汇聚。
@@ -173,8 +174,8 @@ class CLSRModel(SequentialBaseModel):
                 self.att_fea_long = tf.reduce_sum(att_outputs_long, 1)
                 tf.summary.histogram("att_fea_long", self.att_fea_long)
 
-                # 完整历史均值是长期兴趣的代理表示，用来构造对比损失。
-                self.hist_mean = tf.reduce_sum(hist_input*tf.expand_dims(self.real_mask, -1), 1)/tf.reduce_sum(self.real_mask, 1, keepdims=True)
+                # 长期兴趣代理表示（默认 mean，可切换到 decay / update）。
+                self.hist_mean = self._build_long_proxy(hist_input)
 
             with tf.variable_scope("short_term"):
                 if hparams.interest_evolve:
@@ -193,7 +194,6 @@ class CLSRModel(SequentialBaseModel):
                 tf.summary.histogram("GRU_final_state", short_term_intention)
 
                 # reverse cumsum 会把最后一个有效位置记成 1，用它来筛出最近 k 个行为。
-                self.position = tf.math.cumsum(self.real_mask, axis=1, reverse=True)
                 self.recent_mask = tf.logical_and(self.position >= 1, self.position <= hparams.contrastive_recent_k)
                 self.real_recent_mask = tf.where(self.recent_mask, tf.ones_like(self.recent_mask, dtype=tf.float32), tf.zeros_like(self.recent_mask, dtype=tf.float32))
 
@@ -307,6 +307,57 @@ class CLSRModel(SequentialBaseModel):
             model_output = tf.concat([user_embed, self.target_item_embedding], 1)
             tf.summary.histogram("model_output", model_output)
             return model_output
+
+    def _build_long_proxy(self, hist_input):
+        """Build long-term proxy for contrastive learning."""
+        proxy_type = getattr(self.hparams, "long_proxy_type", "mean")
+        if proxy_type == "mean":
+            return self._build_long_proxy_mean(hist_input)
+        if proxy_type == "decay":
+            return self._build_long_proxy_decay(hist_input)
+        if proxy_type == "update":
+            return self._build_long_proxy_update(hist_input)
+        raise ValueError("Unsupported long_proxy_type: {}".format(proxy_type))
+
+    def _build_long_proxy_mean(self, hist_input):
+        """Original CLSR long proxy: masked mean over full history."""
+        denom = tf.maximum(tf.reduce_sum(self.real_mask, 1, keepdims=True), 1e-8)
+        return tf.reduce_sum(hist_input * tf.expand_dims(self.real_mask, -1), 1) / denom
+
+    def _build_long_proxy_decay(self, hist_input):
+        """Time-decayed long proxy: weighted average over full history."""
+        decay_lambda = self.hparams.long_proxy_decay_lambda
+        age = tf.maximum(self.position - 1.0, 0.0)
+        weights = tf.exp(-decay_lambda * age) * self.real_mask
+        weight_denom = tf.maximum(tf.reduce_sum(weights, 1, keepdims=True), 1e-8)
+        weights = weights / weight_denom
+        return tf.reduce_sum(hist_input * tf.expand_dims(weights, -1), 1)
+
+    def _build_long_proxy_update(self, hist_input):
+        """Windowed recursive-updating long proxy."""
+        window_size = self.hparams.long_proxy_update_window_size
+        beta = self.hparams.long_proxy_update_beta
+        max_seq_length = self.hparams.max_seq_length
+        num_segments = (max_seq_length + window_size - 1) // window_size
+
+        proxy = None
+        for i in range(num_segments):
+            start = i * window_size
+            end = min((i + 1) * window_size, max_seq_length)
+
+            seg_emb = hist_input[:, start:end, :]
+            seg_mask = self.real_mask[:, start:end]
+            seg_denom = tf.reduce_sum(seg_mask, 1, keepdims=True)
+            seg_mean = tf.reduce_sum(seg_emb * tf.expand_dims(seg_mask, -1), 1) / tf.maximum(seg_denom, 1e-8)
+
+            if proxy is None:
+                proxy = seg_mean
+            else:
+                updated_proxy = (1.0 - beta) * proxy + beta * seg_mean
+                has_signal = tf.cast(tf.greater(seg_denom, 0.0), tf.float32)
+                proxy = has_signal * updated_proxy + (1.0 - has_signal) * proxy
+
+        return proxy
 
     def _fcn_transform_net(self, model_output, layer_sizes, scope):
         """Construct the MLP part for the model.
