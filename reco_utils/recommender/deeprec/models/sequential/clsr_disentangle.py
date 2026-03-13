@@ -134,7 +134,10 @@ class CLSRDisentangleModel(CLSRModel):
         gram_list = []
         with tf.variable_scope("long_disentangle"):
             for i in range(k_long):
-                intent_i = tf.layers.dense(long_interest, long_interest.shape[-1].value, name="long_intent_proj_{}".format(i))
+                intent_delta_i = tf.layers.dense(
+                    long_interest, long_interest.shape[-1].value, name="long_intent_proj_{}".format(i)
+                )
+                intent_i = long_interest + intent_delta_i
                 intent_list.append(intent_i)
                 gram_list.append(tf.nn.l2_normalize(intent_i, axis=1))
             intents = tf.stack(intent_list, axis=1)
@@ -152,7 +155,10 @@ class CLSRDisentangleModel(CLSRModel):
         gram_list = []
         with tf.variable_scope("short_disentangle"):
             for i in range(k_short):
-                intent_i = tf.layers.dense(short_interest, short_interest.shape[-1].value, name="short_intent_proj_{}".format(i))
+                intent_delta_i = tf.layers.dense(
+                    short_interest, short_interest.shape[-1].value, name="short_intent_proj_{}".format(i)
+                )
+                intent_i = short_interest + intent_delta_i
                 intent_list.append(intent_i)
                 gram_list.append(tf.nn.l2_normalize(intent_i, axis=1))
             intents = tf.stack(intent_list, axis=1)
